@@ -1,4 +1,5 @@
-/* Copyright (c) 2009-2014, The Linux Foundation. All rights reserved.
+/*
+ * Copyright (c) 2009-2015,2017, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -43,6 +44,7 @@
 #define SMEM_IMAGE_VERSION_OEM_OFFSET 96
 #define SMEM_IMAGE_VERSION_PARTITION_APPS 10
 
+static DECLARE_RWSEM(current_image_rwsem);
 enum {
 	HW_PLATFORM_UNKNOWN = 0,
 	HW_PLATFORM_SURF    = 1,
@@ -116,7 +118,8 @@ const char *hw_platform_subtype[] = {
 	[PLATFORM_SUBTYPE_UNKNOWN] = "Unknown",
 	[PLATFORM_SUBTYPE_CHARM] = "charm",
 	[PLATFORM_SUBTYPE_STRANGE] = "strange",
-	[PLATFORM_SUBTYPE_STRANGE_2A] = "strange_2a,"
+	[PLATFORM_SUBTYPE_STRANGE_2A] = "strange_2a",
+	[PLATFORM_SUBTYPE_INVALID] = "Invalid",
 };
 
 /* Used to parse shared memory.  Must match the modem. */
@@ -188,6 +191,13 @@ struct socinfo_v9 {
 	uint32_t foundry_id;
 };
 
+struct socinfo_v10 {
+	struct socinfo_v9 v9;
+
+	/* only valid when format==10*/
+	uint32_t serial_number;
+};
+
 static union {
 	struct socinfo_v1 v1;
 	struct socinfo_v2 v2;
@@ -198,6 +208,7 @@ static union {
 	struct socinfo_v7 v7;
 	struct socinfo_v8 v8;
 	struct socinfo_v9 v9;
+	struct socinfo_v10 v10;
 } *socinfo;
 
 static struct msm_soc_info cpu_of_id[] = {
@@ -465,9 +476,15 @@ static struct msm_soc_info cpu_of_id[] = {
 
 	/* 8909 IDs */
 	[245] = {MSM_CPU_8909, "MSM8909"},
+	[258] = {MSM_CPU_8909, "MSM8209"},
+	[259] = {MSM_CPU_8909, "MSM8208"},
+	[265] = {MSM_CPU_8909, "APQ8009"},
+	[275] = {MSM_CPU_8909, "MSM8609"},
 	[260] = {MSM_CPU_8909, "MDMFERRUM"},
 	[261] = {MSM_CPU_8909, "MDMFERRUM"},
 	[262] = {MSM_CPU_8909, "MDMFERRUM"},
+	[300] = {MSM_CPU_8909, "MSM8909W"},
+	[301] = {MSM_CPU_8909, "APQ8009W"},
 
 	/* ZIRC IDs */
 	[234] = {MSM_CPU_ZIRC, "MSMZIRC"},
@@ -491,6 +508,12 @@ static struct msm_soc_info cpu_of_id[] = {
 
 	/* Tellurium ID */
 	[264] = {MSM_CPU_TELLURIUM, "MSMTELLURIUM"},
+
+	/* 8929 IDs */
+	[268] = {MSM_CPU_8929, "MSM8929"},
+	[269] = {MSM_CPU_8929, "MSM8629"},
+	[270] = {MSM_CPU_8929, "MSM8229"},
+	[271] = {MSM_CPU_8929, "APQ8029"},
 
 	/* Uninitialized IDs are not known to run Linux.
 	   MSM_CPU_UNKNOWN is set to 0 to ensure these IDs are
@@ -709,10 +732,14 @@ msm_get_platform_subtype(struct device *dev,
 		}
 		return snprintf(buf, PAGE_SIZE, "%-.32s\n",
 					qrd_hw_platform_subtype[hw_subtype]);
+	} else {
+		if (hw_subtype >= PLATFORM_SUBTYPE_INVALID) {
+			pr_err("Invalid hardware platform subtype\n");
+			hw_subtype = PLATFORM_SUBTYPE_INVALID;
+		}
+		return snprintf(buf, PAGE_SIZE, "%-.32s\n",
+			hw_platform_subtype[hw_subtype]);
 	}
-
-	return snprintf(buf, PAGE_SIZE, "%-.32s\n",
-		hw_platform_subtype[hw_subtype]);
 }
 
 static ssize_t
@@ -766,7 +793,9 @@ msm_get_image_version(struct device *dev,
 				__func__);
 		return snprintf(buf, SMEM_IMAGE_VERSION_NAME_SIZE, "Unknown");
 	}
+	down_read(&current_image_rwsem);
 	string_address += current_image * SMEM_IMAGE_VERSION_SINGLE_BLOCK_SIZE;
+	up_read(&current_image_rwsem);
 	return snprintf(buf, SMEM_IMAGE_VERSION_NAME_SIZE, "%-.75s\n",
 			string_address);
 }
@@ -779,15 +808,20 @@ msm_set_image_version(struct device *dev,
 {
 	char *store_address;
 
-	if (current_image != SMEM_IMAGE_VERSION_PARTITION_APPS)
+	down_read(&current_image_rwsem);
+	if (current_image != SMEM_IMAGE_VERSION_PARTITION_APPS) {
+		up_read(&current_image_rwsem);
 		return count;
+	}
 	store_address = socinfo_get_image_version_base_address();
 	if (IS_ERR_OR_NULL(store_address)) {
 		pr_err("%s : Failed to get image version base address",
 				__func__);
+		up_read(&current_image_rwsem);
 		return count;
 	}
 	store_address += current_image * SMEM_IMAGE_VERSION_SINGLE_BLOCK_SIZE;
+	up_read(&current_image_rwsem);
 	snprintf(store_address, SMEM_IMAGE_VERSION_NAME_SIZE, "%-.75s", buf);
 	return count;
 }
@@ -806,7 +840,9 @@ msm_get_image_variant(struct device *dev,
 		return snprintf(buf, SMEM_IMAGE_VERSION_VARIANT_SIZE,
 		"Unknown");
 	}
+	down_read(&current_image_rwsem);
 	string_address += current_image * SMEM_IMAGE_VERSION_SINGLE_BLOCK_SIZE;
+	up_read(&current_image_rwsem);
 	string_address += SMEM_IMAGE_VERSION_VARIANT_OFFSET;
 	return snprintf(buf, SMEM_IMAGE_VERSION_VARIANT_SIZE, "%-.20s\n",
 			string_address);
@@ -820,15 +856,20 @@ msm_set_image_variant(struct device *dev,
 {
 	char *store_address;
 
-	if (current_image != SMEM_IMAGE_VERSION_PARTITION_APPS)
+	down_read(&current_image_rwsem);
+	if (current_image != SMEM_IMAGE_VERSION_PARTITION_APPS) {
+		up_read(&current_image_rwsem);
 		return count;
+	}
 	store_address = socinfo_get_image_version_base_address();
 	if (IS_ERR_OR_NULL(store_address)) {
 		pr_err("%s : Failed to get image version base address",
 				__func__);
+		up_read(&current_image_rwsem);
 		return count;
 	}
 	store_address += current_image * SMEM_IMAGE_VERSION_SINGLE_BLOCK_SIZE;
+	up_read(&current_image_rwsem);
 	store_address += SMEM_IMAGE_VERSION_VARIANT_OFFSET;
 	snprintf(store_address, SMEM_IMAGE_VERSION_VARIANT_SIZE, "%-.20s", buf);
 	return count;
@@ -847,7 +888,9 @@ msm_get_image_crm_version(struct device *dev,
 				__func__);
 		return snprintf(buf, SMEM_IMAGE_VERSION_OEM_SIZE, "Unknown");
 	}
+	down_read(&current_image_rwsem);
 	string_address += current_image * SMEM_IMAGE_VERSION_SINGLE_BLOCK_SIZE;
+	up_read(&current_image_rwsem);
 	string_address += SMEM_IMAGE_VERSION_OEM_OFFSET;
 	return snprintf(buf, SMEM_IMAGE_VERSION_OEM_SIZE, "%-.32s\n",
 			string_address);
@@ -861,15 +904,20 @@ msm_set_image_crm_version(struct device *dev,
 {
 	char *store_address;
 
-	if (current_image != SMEM_IMAGE_VERSION_PARTITION_APPS)
+	down_read(&current_image_rwsem);
+	if (current_image != SMEM_IMAGE_VERSION_PARTITION_APPS) {
+		up_read(&current_image_rwsem);
 		return count;
+	}
 	store_address = socinfo_get_image_version_base_address();
 	if (IS_ERR_OR_NULL(store_address)) {
 		pr_err("%s : Failed to get image version base address",
 				__func__);
+		up_read(&current_image_rwsem);
 		return count;
 	}
 	store_address += current_image * SMEM_IMAGE_VERSION_SINGLE_BLOCK_SIZE;
+	up_read(&current_image_rwsem);
 	store_address += SMEM_IMAGE_VERSION_OEM_OFFSET;
 	snprintf(store_address, SMEM_IMAGE_VERSION_OEM_SIZE, "%-.32s", buf);
 	return count;
@@ -880,8 +928,14 @@ msm_get_image_number(struct device *dev,
 			struct device_attribute *attr,
 			char *buf)
 {
-	return snprintf(buf, PAGE_SIZE, "%d\n",
+	int ret;
+
+	down_read(&current_image_rwsem);
+	ret = snprintf(buf, PAGE_SIZE, "%d\n",
 			current_image);
+	up_read(&current_image_rwsem);
+	return ret;
+
 }
 
 static ssize_t
@@ -893,10 +947,12 @@ msm_select_image(struct device *dev, struct device_attribute *attr,
 	ret = kstrtoint(buf, 10, &digit);
 	if (ret)
 		return ret;
+	down_write(&current_image_rwsem);
 	if (0 <= digit && digit < SMEM_IMAGE_VERSION_BLOCKS_COUNT)
 		current_image = digit;
 	else
 		current_image = 0;
+	up_write(&current_image_rwsem);
 	return count;
 }
 
@@ -1006,6 +1062,10 @@ static void * __init setup_dummy_socinfo(void)
 		dummy_socinfo.id = 264;
 		strlcpy(dummy_socinfo.build_id, "msmtellurium - ",
 			sizeof(dummy_socinfo.build_id));
+	} else if (early_machine_is_msm8929()) {
+		dummy_socinfo.id = 268;
+		strlcpy(dummy_socinfo.build_id, "msm8929 - ",
+			sizeof(dummy_socinfo.build_id));
 	}
 
 	strlcat(dummy_socinfo.build_id, "Dummy socinfo",
@@ -1024,6 +1084,7 @@ static void __init populate_soc_sysfs_files(struct device *msm_soc_device)
 	device_create_file(msm_soc_device, &select_image);
 
 	switch (legacy_format) {
+	case 10:
 	case 9:
 		 device_create_file(msm_soc_device,
 					&msm_soc_attr_foundry_id);
@@ -1199,6 +1260,22 @@ static void socinfo_print(void)
 			socinfo->v7.pmic_die_revision,
 			socinfo->v9.foundry_id);
 		break;
+	case 10:
+		pr_info("%s: v%u, id=%u, ver=%u.%u, raw_id=%u, raw_ver=%u, hw_plat=%u, hw_plat_ver=%u\n accessory_chip=%u, hw_plat_subtype=%u, pmic_model=%u, pmic_die_revision=%u foundry_id=%u serial_number=%u\n",
+			__func__,
+			socinfo->v1.format,
+			socinfo->v1.id,
+			SOCINFO_VERSION_MAJOR(socinfo->v1.version),
+			SOCINFO_VERSION_MINOR(socinfo->v1.version),
+			socinfo->v2.raw_id, socinfo->v2.raw_version,
+			socinfo->v3.hw_platform, socinfo->v4.platform_version,
+			socinfo->v5.accessory_chip,
+			socinfo->v6.hw_platform_subtype,
+			socinfo->v7.pmic_model,
+			socinfo->v7.pmic_die_revision,
+			socinfo->v9.foundry_id,
+			socinfo->v10.serial_number);
+		break;
 
 	default:
 		pr_err("%s: Unknown format found\n", __func__);
@@ -1214,6 +1291,12 @@ int __init socinfo_init(void)
 		return 0;
 
 	socinfo = smem_find(SMEM_HW_SW_BUILD_ID,
+				sizeof(struct socinfo_v10),
+				0,
+				SMEM_ANY_HOST_FLAG);
+
+	if (IS_ERR_OR_NULL(socinfo))
+		socinfo = smem_find(SMEM_HW_SW_BUILD_ID,
 				sizeof(struct socinfo_v9),
 				0,
 				SMEM_ANY_HOST_FLAG);

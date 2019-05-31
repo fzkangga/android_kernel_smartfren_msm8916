@@ -79,7 +79,6 @@ struct pil_mdt {
  * struct pil_seg - memory map representing one segment
  * @next: points to next seg mentor NULL if last segment
  * @paddr: physical start address of segment
- * @vaddr: virtual start address of segment
  * @sz: size of segment
  * @filesz: size of segment on disk
  * @num: segment number
@@ -90,7 +89,6 @@ struct pil_mdt {
  */
 struct pil_seg {
 	phys_addr_t paddr;
-	void *vaddr;
 	unsigned long sz;
 	unsigned long filesz;
 	int num;
@@ -154,14 +152,13 @@ int pil_do_ramdump(struct pil_desc *desc, void *ramdump_dev)
 	list_for_each_entry(seg, &priv->segs, list)
 		count++;
 
-	ramdump_segs = kmalloc_array(count, sizeof(*ramdump_segs), GFP_KERNEL);
+	ramdump_segs = kcalloc(count, sizeof(*ramdump_segs), GFP_KERNEL);
 	if (!ramdump_segs)
 		return -ENOMEM;
 
 	s = ramdump_segs;
 	list_for_each_entry(seg, &priv->segs, list) {
 		s->address = seg->paddr;
-		s->v_address = seg->vaddr;
 		s->size = seg->sz;
 		s++;
 	}
@@ -296,8 +293,6 @@ static struct pil_seg *pil_init_seg(const struct pil_desc *desc,
 		return ERR_PTR(-ENOMEM);
 	seg->num = num;
 	seg->paddr = reloc ? pil_reloc(priv, phdr->p_paddr) : phdr->p_paddr;
-	seg->vaddr = reloc ? priv->region +
-			(seg->paddr - priv->region_start) : 0;
 	seg->filesz = phdr->p_filesz;
 	seg->sz = phdr->p_memsz;
 	seg->relocated = reloc;
@@ -386,6 +381,8 @@ static int pil_alloc_region(struct pil_priv *priv, phys_addr_t min_addr,
 	if (region == NULL) {
 		pil_err(priv->desc, "Failed to allocate relocatable region of size %zx\n",
 					size);
+		priv->region_start = 0;
+		priv->region_end = 0;
 		return -ENOMEM;
 	}
 
@@ -503,6 +500,13 @@ static int pil_init_mmap(struct pil_desc *desc, const struct pil_mdt *mdt)
 	return pil_init_entry_addr(priv, mdt);
 }
 
+struct pil_map_fw_info {
+	void *region;
+	struct dma_attrs attrs;
+	phys_addr_t base_addr;
+	struct device *dev;
+};
+
 static void pil_release_mmap(struct pil_desc *desc)
 {
 	struct pil_priv *priv = desc->priv;
@@ -521,14 +525,30 @@ static void pil_release_mmap(struct pil_desc *desc)
 	}
 }
 
-#define IOMAP_SIZE SZ_1M
+static void pil_clear_segment(struct pil_desc *desc)
+{
+	struct pil_priv *priv = desc->priv;
+	u8 __iomem *buf;
 
-struct pil_map_fw_info {
-	void *region;
-	struct dma_attrs attrs;
-	phys_addr_t base_addr;
-	struct device *dev;
-};
+	struct pil_map_fw_info map_fw_info = {
+		.attrs = desc->attrs,
+		.region = priv->region,
+		.base_addr = priv->region_start,
+		.dev = desc->dev,
+	};
+
+	void *map_data = desc->map_data ? desc->map_data : &map_fw_info;
+
+	/* Clear memory so that unauthorized ELF code is not left behind */
+	buf = desc->map_fw_mem(priv->region_start, (priv->region_end -
+					priv->region_start), map_data);
+	pil_memset_io(buf, 0, (priv->region_end - priv->region_start));
+	desc->unmap_fw_mem(buf, (priv->region_end - priv->region_start),
+								map_data);
+
+}
+
+#define IOMAP_SIZE SZ_1M
 
 static void *map_fw_mem(phys_addr_t paddr, size_t size, void *data)
 {
@@ -754,6 +774,8 @@ out:
 					&desc->attrs);
 			priv->region = NULL;
 		}
+		if (desc->clear_fw_region && priv->region_start)
+			pil_clear_segment(desc);
 		pil_release_mmap(desc);
 	}
 	return ret;
@@ -779,6 +801,16 @@ void pil_shutdown(struct pil_desc *desc)
 		pil_proxy_unvote(desc, 1);
 	else
 		flush_delayed_work(&priv->proxy);
+}
+EXPORT_SYMBOL(pil_shutdown);
+
+/**
+ * pil_free_memory() - Free memory resources associated with a peripheral
+ * @desc: descriptor from pil_desc_init()
+ */
+void pil_free_memory(struct pil_desc *desc)
+{
+	struct pil_priv *priv = desc->priv;
 
 	if (priv->region) {
 		dma_free_attrs(desc->dev, priv->region_size,
@@ -786,7 +818,7 @@ void pil_shutdown(struct pil_desc *desc)
 		priv->region = NULL;
 	}
 }
-EXPORT_SYMBOL(pil_shutdown);
+EXPORT_SYMBOL(pil_free_memory);
 
 static DEFINE_IDA(pil_ida);
 

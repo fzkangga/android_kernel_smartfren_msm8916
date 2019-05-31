@@ -37,8 +37,7 @@ obj-$(CONFIG_MSM_SMD) += smd.o smd_debug.o smd_private.o smd_init_dt.o smsm_debu
 obj-$(CONFIG_MSM_SMEM) += smem.o smem_debug.o
 obj-$(CONFIG_MSM_SMEM_LOGGING) += smem_log.o
 obj-$(CONFIG_MSM_COMMON_LOG) += common_log.o
-obj-$(CONFIG_MSM_SMP2P) += smp2p.o smp2p_debug.o
-obj-$(CONFIG_MSM_SMP2P_TEST) += smp2p_loopback.o smp2p_test.o smp2p_spinlock_test.o
+obj-$(CONFIG_MSM_SMP2P) += smp2p.o smp2p_loopback.o smp2p_debug.o
 obj-$(CONFIG_MSM_WATCHDOG_V2) += watchdog_v2.o
 obj-$(CONFIG_MEM_SHARE_QMI_SERVICE)		+= memshare/
 obj-$(CONFIG_MSM_SPM) += spm.o spm_devices.o
@@ -56,6 +55,7 @@ obj-$(CONFIG_MSM_OCMEM) += ocmem.o ocmem_allocator.o ocmem_notifier.o
 obj-$(CONFIG_MSM_OCMEM) += ocmem_sched.o ocmem_api.o ocmem_rdm.o ocmem_core.o
 
 obj-$(CONFIG_MSM_PERFORMANCE) += msm_performance.o
+obj-$(CONFIG_MSM_CORE_CTL_HELPER) += core_ctl_helper.o
 
 ifdef CONFIG_MSM_SUBSYSTEM_RESTART
        obj-y += subsystem_notif.o
